@@ -1,0 +1,9 @@
+syntax = "proto3";
+
+package protocol;
+
+//Package 数据包定义
+message Package {
+    int32 serial    = 1; //协议号
+    bytes buff      = 2; //子协议包
+}

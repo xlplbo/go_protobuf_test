@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"fmt"
+	"net"
 	"unsafe"
 
 	"github.com/golang/protobuf/proto"
@@ -72,4 +73,17 @@ func UnPack(data []byte) (int, int32, []byte, error) {
 		return 0, 0, nil, nil
 	}
 	return size, pkg.GetSerial(), pkg.GetBuff(), nil
+}
+
+// SendMessage protocol id, protocol message
+// return error
+func SendMessage(conn net.Conn, serial int32, msg proto.Message) error {
+	buff, err := Pack(serial, msg)
+	if err != nil {
+		return err
+	}
+	if _, err := conn.Write(buff); err != nil {
+		return err
+	}
+	return nil
 }

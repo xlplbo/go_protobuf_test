@@ -1,97 +1,246 @@
 package main
 
 import (
+	"bytes"
 	"fmt"
+	"io"
 	"log"
 	"net"
+	"os"
+	"os/signal"
+	"strconv"
+	"strings"
+	"sync"
+	"time"
 
 	"github.com/golang/protobuf/proto"
 	"github.com/xlplbo/go_protobuf_test/protocol"
 )
 
-func senddata(c net.Conn, serial protocol.S2CCmd, msg proto.Message) error {
-	buff, err := protocol.Pack(int32(serial), msg)
-	if err != nil {
-		return err
-	}
-	if _, err := c.Write(buff); err != nil {
-		log.Println(err)
-		return err
-	}
-	return nil
+//Player struct
+type Player struct {
+	index  uint64
+	conn   net.Conn
+	s      *Server
+	chStop chan error
 }
 
-func main() {
-	// Listen on TCP port 2000 on all available unicast and
-	// anycast IP addresses of the local system.
-	l, err := net.Listen("tcp", ":7788")
+//Play Run
+func (p *Player) Play() {
+	go func() {
+		var data []byte
+		var buff bytes.Buffer
+		for {
+			buff.Reset()
+			n, err := io.Copy(&buff, p.conn)
+			if err != nil {
+				log.Println(err)
+				p.Stop()
+				return
+			}
+			data = append(data, buff.Bytes()[:n]...)
+			for {
+				if len(data) < 1 {
+					break
+				}
+				offset, serial, buff, err := protocol.UnPack(data)
+				if err != nil {
+					log.Println(err)
+					p.Stop()
+					return
+				}
+				p.s.handles[serial](p, buff)
+				data = data[offset:]
+			}
+		}
+	}()
+	for {
+		select {
+		case err := <-p.chStop:
+			p.conn.Close()
+			p.s.DelPlayer(p.index)
+			log.Println(err)
+			return
+		}
+	}
+}
+
+//Stop player
+func (p *Player) Stop() {
+	p.chStop <- fmt.Errorf("player(%d) stop", p.index)
+}
+
+//GetTargetPlayer ...
+func (p *Player) GetTargetPlayer(index uint64) *Player {
+	player := p.s.GetPlayer(index)
+	if player == nil {
+		log.Printf("player(%d) non-exsit", index)
+		return nil
+	}
+	return player
+}
+
+//SendChat ...
+func (p *Player) SendChat(msg string) {
+	if err := protocol.SendMessage(p.conn, int32(protocol.S2CCmd_Result), &protocol.S2CResult{
+		Context: msg,
+	}); err != nil {
+		log.Println(err)
+	}
+}
+
+//Server center
+type Server struct {
+	index   uint64
+	players map[uint64]*Player
+	handles map[int32]func(*Player, []byte)
+	chStop  chan error
+	chConn  chan net.Conn
+	chSig   chan os.Signal
+	mutext  *sync.Mutex
+}
+
+func (s *Server) getFreeIndex() uint64 {
+	s.mutext.Lock()
+	defer s.mutext.Unlock()
+	var i uint64 = 1
+	for i = 1; i <= s.index; i++ {
+		if _, ok := s.players[i]; !ok {
+			return i
+		}
+	}
+	s.index++
+	return s.index
+}
+
+func (s *Server) brocastPlayerList() {
+	var buf bytes.Buffer
+	buf.WriteString("playerlist:")
+	var array []string
+	for index := range s.players {
+		array = append(array, strconv.FormatUint(index, 10))
+	}
+	buf.WriteString(strings.Join(array, ","))
+	for _, p := range s.players {
+		p.SendChat(buf.String())
+	}
+}
+
+//Run start service
+func (s *Server) Run() {
+	for {
+		select {
+		case <-time.Tick(time.Second):
+			s.brocastPlayerList()
+		case conn := <-s.chConn:
+			index := s.getFreeIndex()
+			player := &Player{
+				index:  index,
+				conn:   conn,
+				s:      s,
+				chStop: make(chan error, 1),
+			}
+			s.players[index] = player
+			go player.Play()
+			s.brocastPlayerList()
+			log.Printf("player(%d) %s connect.\n", index, conn.RemoteAddr().String())
+		case msg := <-s.chStop:
+			var array []uint64
+			for index := range s.players {
+				array = append(array, index)
+			}
+			for _, index := range array {
+				s.GetPlayer(index).Stop()
+			}
+			log.Printf("server stop: %s\n", msg.Error())
+			return
+		}
+	}
+}
+
+//ListenTCP only call func use go routine
+func (s *Server) ListenTCP(laddr string) {
+	l, err := net.Listen("tcp", laddr)
 	if err != nil {
-		log.Fatal(err)
+		s.chStop <- err
 	}
 	defer l.Close()
+	log.Printf("listen at %s\n", l.Addr().String())
 	for {
-		// Wait for a connection.
 		conn, err := l.Accept()
 		if err != nil {
 			log.Println(err)
 			continue
 		}
-		// Handle the connection in a new goroutine.
-		// The loop then returns to accepting, so that
-		// multiple connections may be served concurrently.
-		log.Printf("client(%s) connect.\n", conn.RemoteAddr().String())
-		go work(conn)
+		s.chConn <- conn
 	}
 }
 
-func work(conn net.Conn) {
-	defer conn.Close()
-	var data []byte
-	count := 0
+//GetPlayer instance
+func (s *Server) GetPlayer(key uint64) *Player {
+	if player, ok := s.players[key]; ok {
+		return player
+	}
+	return nil
+}
+
+//DelPlayer ...
+func (s *Server) DelPlayer(key uint64) {
+	delete(s.players, key)
+}
+
+//RegisterHandle ...
+func (s *Server) RegisterHandle(id protocol.C2SCmd, f func(*Player, []byte)) {
+	nID := int32(id)
+	if _, ok := s.handles[nID]; ok {
+		log.Printf("protocol(%d) handle repeat\n", nID)
+		return
+	}
+	s.handles[int32(id)] = f
+}
+
+//HandleSignal ...
+func (s *Server) HandleSignal() {
+	signal.Notify(s.chSig, os.Interrupt)
 	for {
-		buf := make([]byte, 1024) //buffer大小应用环境决定
-		n, err := conn.Read(buf)
-		if err != nil {
-			log.Println(err)
-			break
-		}
-		data = append(data, buf[:n]...)
-		for {
-			if len(data) < 1 {
-				break
-			}
-			offset, serial, buff, err := protocol.UnPack(data)
-			if err != nil {
-				log.Println(err)
-				break
-			}
-			switch protocol.C2SCmd(serial) {
-			case protocol.C2SCmd_None:
-				//异常终止
-				log.Println("connect close.")
-				return
-			case protocol.C2SCmd_Login:
-				var msgLogin protocol.C2SLogin
-				if err := proto.Unmarshal(buff, &msgLogin); err != nil {
-					log.Println(err)
-				}
-				fmt.Printf("login use:%s, passwd:%s\n", msgLogin.GetUser(), msgLogin.GetPasswd())
-				// senddata(conn, protocol.S2CCmd_S2C_Result, &protocol.S2CResult{
-				// 	Context: "login recviced",
-				// })
-			case protocol.C2SCmd_Chat:
-				var msgChat protocol.C2SChat
-				if err := proto.Unmarshal(buff, &msgChat); err != nil {
-					log.Println(err)
-				}
-				fmt.Printf("client say:type %d, %s\n", msgChat.GetCount(), msgChat.GetContext())
-				count++
-				// senddata(conn, protocol.S2CCmd_S2C_Result, &protocol.S2CResult{
-				// 	Context: "chat recviced",
-				// })
-			}
-			data = data[offset:]
+		select {
+		case sig := <-s.chSig:
+			s.chStop <- fmt.Errorf(sig.String())
+			return
 		}
 	}
-	fmt.Printf("count = %d\n", count)
+}
+
+//NewServer instance
+func NewServer() *Server {
+	s := &Server{
+		index:   0,
+		players: make(map[uint64]*Player),
+		handles: make(map[int32]func(*Player, []byte)),
+		chStop:  make(chan error, 1),
+		chConn:  make(chan net.Conn, 1),
+		chSig:   make(chan os.Signal, 1),
+		mutext:  &sync.Mutex{},
+	}
+	s.RegisterHandle(protocol.C2SCmd_None, func(p *Player, msg []byte) {
+		p.Stop()
+	})
+	s.RegisterHandle(protocol.C2SCmd_Chat, func(p *Player, msg []byte) {
+		var chatMsg protocol.C2SChat
+		if err := proto.Unmarshal(msg, &chatMsg); err != nil {
+			p.Stop()
+		}
+		player := p.GetTargetPlayer(chatMsg.Index)
+		if player != nil {
+			player.SendChat(chatMsg.Context)
+		}
+	})
+	return s
+}
+
+func main() {
+	app := NewServer()
+	go app.HandleSignal()
+	go app.ListenTCP(":7788")
+	app.Run()
 }

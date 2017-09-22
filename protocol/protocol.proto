@@ -11,17 +11,11 @@ message Package {
 //客户端发给服务器的协议定义
 enum C2SCmd {
   None  = 0;    // 断开
-  Login = 1;    // 登录
-  Chat  = 2;    // 发送消息
-}
-
-message C2SLogin {
-  string user   = 1;
-  string passwd = 2;
+  Chat  = 1;    // 发送消息
 }
 
 message C2SChat {
-  uint32 count      = 1;
+  uint64 index      = 1;
   string context    = 2;
 }
 

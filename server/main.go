@@ -3,7 +3,6 @@ package main
 import (
 	"bytes"
 	"fmt"
-	"io"
 	"log"
 	"net"
 	"os"
@@ -11,7 +10,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/golang/protobuf/proto"
 	"github.com/xlplbo/go_protobuf_test/protocol"
@@ -29,28 +27,25 @@ type Player struct {
 func (p *Player) Play() {
 	go func() {
 		var data []byte
-		var buff bytes.Buffer
+		buff := make([]byte, protocol.MaxSize)
 		for {
-			buff.Reset()
-			n, err := io.Copy(&buff, p.conn)
+			n, err := p.conn.Read(buff)
 			if err != nil {
-				log.Println(err)
-				p.Stop()
+				p.chStop <- err
 				return
 			}
-			data = append(data, buff.Bytes()[:n]...)
+			data = append(data, buff[:n]...)
 			for {
-				if len(data) < 1 {
+				offset, serial, buff := protocol.UnPack(data)
+				if buff == nil {
 					break
 				}
-				offset, serial, buff, err := protocol.UnPack(data)
-				if err != nil {
-					log.Println(err)
-					p.Stop()
-					return
-				}
-				p.s.handles[serial](p, buff)
 				data = data[offset:]
+				if f, ok := p.s.handles[serial]; !ok {
+					f(p, buff)
+					break
+				}
+				log.Printf("protocol id(%d) not handle\n", serial)
 			}
 		}
 	}()
@@ -82,7 +77,7 @@ func (p *Player) GetTargetPlayer(index uint64) *Player {
 
 //SendChat ...
 func (p *Player) SendChat(msg string) {
-	if err := protocol.SendMessage(p.conn, int32(protocol.S2CCmd_Result), &protocol.S2CResult{
+	if err := protocol.Send2Client(p.conn, protocol.S2CCmd_Result, &protocol.S2CResult{
 		Context: msg,
 	}); err != nil {
 		log.Println(err)
@@ -130,8 +125,6 @@ func (s *Server) brocastPlayerList() {
 func (s *Server) Run() {
 	for {
 		select {
-		case <-time.Tick(time.Second):
-			s.brocastPlayerList()
 		case conn := <-s.chConn:
 			index := s.getFreeIndex()
 			player := &Player{
@@ -196,7 +189,7 @@ func (s *Server) RegisterHandle(id protocol.C2SCmd, f func(*Player, []byte)) {
 		log.Printf("protocol(%d) handle repeat\n", nID)
 		return
 	}
-	s.handles[int32(id)] = f
+	s.handles[nID] = f
 }
 
 //HandleSignal ...
@@ -222,7 +215,7 @@ func NewServer() *Server {
 		chSig:   make(chan os.Signal, 1),
 		mutext:  &sync.Mutex{},
 	}
-	s.RegisterHandle(protocol.C2SCmd_None, func(p *Player, msg []byte) {
+	s.RegisterHandle(protocol.C2SCmd_Abnormal, func(p *Player, msg []byte) {
 		p.Stop()
 	})
 	s.RegisterHandle(protocol.C2SCmd_Chat, func(p *Player, msg []byte) {

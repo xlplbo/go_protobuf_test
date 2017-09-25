@@ -19,5 +19,15 @@ How to compile proto file?
 $ sh gen.sh
 ```
 
+How to demonstrate？
+```
+cd server
+go build
+./server
+cd ../client
+go build
+./client
+```
+
 ## Context
 Use protobuf in golang.

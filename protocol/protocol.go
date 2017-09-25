@@ -3,12 +3,15 @@ package protocol
 import (
 	"bytes"
 	"encoding/binary"
-	"fmt"
 	"net"
 	"unsafe"
 
 	"github.com/golang/protobuf/proto"
 )
+
+//MaxSize conn.Read max buffer size
+//Set the size according to the actual application environment
+const MaxSize = 1024
 
 const headsize = int(unsafe.Sizeof(uint32(0)))
 
@@ -29,9 +32,9 @@ func bytes2int(b []byte) (int, error) {
 	return int(value), nil
 }
 
-// Pack data params serial:protocol id, m: protocol message
-// package = head(4 byte) + body proto(* byte)
-// return []byte buff, error
+// Pack params protocol id, *proto.Message
+// package = head(4 byte) + body([]byte)
+// return []byte, error
 func Pack(serial int32, m proto.Message) ([]byte, error) {
 	var pkg Package
 	buff, err := proto.Marshal(m)
@@ -44,7 +47,6 @@ func Pack(serial int32, m proto.Message) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	//fmt.Printf("pack %d\n", len(body))
 	head, err := int2bytes(len(body))
 	if err != nil {
 		return nil, err
@@ -52,33 +54,44 @@ func Pack(serial int32, m proto.Message) ([]byte, error) {
 	return append(head, body...), nil
 }
 
-// UnPack data params data buff []byte
-// return data buff offset, protocol id, protocol message buff []byte, error
-func UnPack(data []byte) (int, int32, []byte, error) {
+// UnPack params []byte
+// return offset, protocol id,  body([]byte)
+func UnPack(data []byte) (int, int32, []byte) {
 	if len(data) < headsize {
-		return 0, 0, nil, fmt.Errorf("data length < %d", headsize)
+		return 0, 0, nil
 	}
-	size, err := bytes2int(data[:headsize])
-	//fmt.Printf("unpack %d\n", size)
+	bodysize, err := bytes2int(data[:headsize])
 	if err != nil {
-		return 0, 0, nil, err
+		return 0, 0, nil
 	}
-	size += headsize
-	if len(data) < size {
-		return 0, 0, nil, fmt.Errorf("data length < %d", size)
+	offset := headsize + bodysize
+	if len(data) < offset {
+		return 0, 0, nil
 	}
 	var pkg Package
-	if err := proto.Unmarshal(data[headsize:size], &pkg); err != nil {
-		//data abnormal
-		return 0, 0, nil, nil
+	if err := proto.Unmarshal(data[headsize:offset], &pkg); err != nil {
+		return 0, 0, []byte{} //data abnormal and disconnect
 	}
-	return size, pkg.GetSerial(), pkg.GetBuff(), nil
+	return offset, pkg.Serial, pkg.Buff
 }
 
-// SendMessage protocol id, protocol message
+// Send2Client protocol id, protocol message
 // return error
-func SendMessage(conn net.Conn, serial int32, msg proto.Message) error {
-	buff, err := Pack(serial, msg)
+func Send2Client(conn net.Conn, serial S2CCmd, msg proto.Message) error {
+	buff, err := Pack(int32(serial), msg)
+	if err != nil {
+		return err
+	}
+	if _, err := conn.Write(buff); err != nil {
+		return err
+	}
+	return nil
+}
+
+// Send2Server protocol id, protocol message
+// return error
+func Send2Server(conn net.Conn, serial C2SCmd, msg proto.Message) error {
+	buff, err := Pack(int32(serial), msg)
 	if err != nil {
 		return err
 	}

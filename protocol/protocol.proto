@@ -10,18 +10,19 @@ message Package {
 
 //客户端发给服务器的协议定义
 enum C2SCmd {
-  None  = 0;    // 断开
-  Chat  = 1;    // 发送消息
+    Abnormal  = 0;    // 断开
+    Chat  = 1;    // 发送消息
 }
 
 message C2SChat {
-  uint64 index      = 1;
-  string context    = 2;
+    uint64 index      = 1;
+    string context    = 2;
 }
 
 //服务器发给客户端的协议定义
 enum S2CCmd {
-    Result =   0;
+    Invalid = 0; // 断开
+    Result  = 1;    // 服务器返回信息
 }
 
 message S2CResult {

@@ -2,7 +2,6 @@ package main
 
 import (
 	"fmt"
-	"io/ioutil"
 	"log"
 	"net"
 	"os"
@@ -14,10 +13,26 @@ import (
 )
 
 var handles map[int32]func([]byte)
+var chStop chan error
 
 func init() {
+	chStop = make(chan error, 1)
 	handles = make(map[int32]func([]byte))
-	handles[int32(protocol.S2CCmd_Result)] = showMsg
+	registerHandle(protocol.S2CCmd_Invalid, stopClient)
+	registerHandle(protocol.S2CCmd_Result, showMsg)
+}
+
+func registerHandle(id protocol.S2CCmd, f func([]byte)) {
+	nID := int32(id)
+	if _, ok := handles[nID]; ok {
+		log.Printf("protocol(%d) handle repeat\n", nID)
+		return
+	}
+	handles[nID] = f
+}
+
+func stopClient(msg []byte) {
+	chStop <- fmt.Errorf("data invalid")
 }
 
 func showMsg(msg []byte) {
@@ -30,7 +45,6 @@ func showMsg(msg []byte) {
 }
 
 func main() {
-	chStop := make(chan error, 1)
 	chSig := make(chan os.Signal, 1)
 	signal.Notify(chSig, os.Interrupt)
 	go func(sig <-chan os.Signal, stop chan<- error) {
@@ -66,30 +80,25 @@ func main() {
 
 	go func(conn net.Conn, stop chan<- error) {
 		var data []byte
+		buff := make([]byte, protocol.MaxSize)
 		for {
-			buff, err := ioutil.ReadAll(conn)
+			n, err := conn.Read(buff)
 			if err != nil {
 				stop <- err
 				return
 			}
-			data = append(data, buff...)
+			data = append(data, buff[:n]...)
 			for {
-				if len(data) < 1 {
+				offset, serial, buff := protocol.UnPack(data)
+				if buff == nil {
 					break
 				}
-				offset, serial, buff, err := protocol.UnPack(data)
-				if err != nil {
-					stop <- err
-					return
-				}
-				f, ok := handles[serial]
-				if !ok {
-					log.Printf("protocol(%d) not find\n", serial)
-					data = data[offset:]
-					continue
-				}
-				f(buff)
 				data = data[offset:]
+				if f, ok := handles[serial]; ok {
+					f(buff)
+					break
+				}
+				log.Printf("protocol(%d) not find\n", serial)
 			}
 		}
 	}(conn, chStop)

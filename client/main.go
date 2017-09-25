@@ -78,7 +78,6 @@ func main() {
 	}(chConn)
 
 	conn := <-chConn
-	defer conn.Close()
 	log.Printf("%s established", conn.RemoteAddr().String())
 
 	// Read data
@@ -100,7 +99,7 @@ func main() {
 				data = data[offset:]
 				if f, ok := handles[serial]; ok {
 					f(buff)
-					break
+					continue
 				}
 				log.Printf("protocol(%d) not find\n", serial)
 			}
@@ -135,9 +134,20 @@ func main() {
 		}
 	}(conn, chStop)
 
+	// Stress test
+	// go func(conn net.Conn) {
+	// 	for {
+	// 		protocol.Send2Server(conn, protocol.C2SCmd_Chat, &protocol.C2SChat{
+	// 			Index:   1,
+	// 			Context: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+	// 		})
+	// 	}
+	// }(conn)
+
 	for {
 		select {
 		case err := <-chStop:
+			conn.Close()
 			log.Println(err)
 			return
 		}

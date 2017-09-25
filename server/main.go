@@ -43,7 +43,7 @@ func (p *Player) Play() {
 				data = data[offset:]
 				if f, ok := p.s.handles[serial]; ok {
 					f(p, buff)
-					break
+					continue
 				}
 				log.Printf("protocol id(%d) not handle\n", serial)
 			}

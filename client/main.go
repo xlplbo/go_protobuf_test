@@ -6,6 +6,8 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/golang/protobuf/proto"
@@ -29,6 +31,7 @@ func registerHandle(id protocol.S2CCmd, f func([]byte)) {
 		return
 	}
 	handles[nID] = f
+	log.Printf("register handle protocol(%d)\n", nID)
 }
 
 func stopClient(msg []byte) {
@@ -78,6 +81,7 @@ func main() {
 	defer conn.Close()
 	log.Printf("%s established", conn.RemoteAddr().String())
 
+	// Read data
 	go func(conn net.Conn, stop chan<- error) {
 		var data []byte
 		buff := make([]byte, protocol.MaxSize)
@@ -100,6 +104,34 @@ func main() {
 				}
 				log.Printf("protocol(%d) not find\n", serial)
 			}
+		}
+	}(conn, chStop)
+
+	// Send data
+	go func(conn net.Conn, stop chan<- error) {
+		for {
+			var input string
+			_, err := fmt.Scanln(&input)
+			if err != nil {
+				log.Println(err)
+				log.Println("please input: target id:msg context")
+				continue
+			}
+			v := strings.Split(input, ":")
+			if len(v) != 2 {
+				log.Println("please input: target id:msg context")
+				continue
+			}
+			index, err := strconv.ParseUint(v[0], 10, 64)
+			if err != nil {
+				log.Println(err)
+				log.Println("please input: target id:msg context")
+				continue
+			}
+			protocol.Send2Server(conn, protocol.C2SCmd_Chat, &protocol.C2SChat{
+				Index:   index,
+				Context: v[1],
+			})
 		}
 	}(conn, chStop)
 

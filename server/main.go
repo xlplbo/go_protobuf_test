@@ -41,7 +41,7 @@ func (p *Player) Play() {
 					break
 				}
 				data = data[offset:]
-				if f, ok := p.s.handles[serial]; !ok {
+				if f, ok := p.s.handles[serial]; ok {
 					f(p, buff)
 					break
 				}
@@ -84,6 +84,11 @@ func (p *Player) SendChat(msg string) {
 	}
 }
 
+//GetIndex ...
+func (p *Player) GetIndex() uint64 {
+	return p.index
+}
+
 //Server center
 type Server struct {
 	index   uint64
@@ -117,7 +122,7 @@ func (s *Server) brocastPlayerList() {
 	}
 	buf.WriteString(strings.Join(array, ","))
 	for _, p := range s.players {
-		p.SendChat(buf.String())
+		p.SendChat(buf.String() + fmt.Sprintf(" your id: %d", p.GetIndex()))
 	}
 }
 
@@ -190,6 +195,7 @@ func (s *Server) RegisterHandle(id protocol.C2SCmd, f func(*Player, []byte)) {
 		return
 	}
 	s.handles[nID] = f
+	log.Printf("register handle protocol(%d)\n", nID)
 }
 
 //HandleSignal ...

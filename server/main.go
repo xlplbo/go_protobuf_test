@@ -9,7 +9,6 @@ import (
 	"os/signal"
 	"strconv"
 	"strings"
-	"sync"
 
 	"github.com/golang/protobuf/proto"
 	"github.com/xlplbo/go_protobuf_test/protocol"
@@ -31,7 +30,8 @@ func (p *Player) Play() {
 		for {
 			n, err := p.conn.Read(buff)
 			if err != nil {
-				p.chStop <- err
+				log.Println(err)
+				p.Stop()
 				return
 			}
 			data = append(data, buff[:n]...)
@@ -49,15 +49,11 @@ func (p *Player) Play() {
 			}
 		}
 	}()
-	for {
-		select {
-		case err := <-p.chStop:
-			p.conn.Close()
-			p.s.DelPlayer(p.index)
-			log.Println(err)
-			return
-		}
-	}
+	err := <-p.chStop
+	p.conn.Close()
+	p.s.DelPlayer(p.index)
+	close(p.chStop)
+	log.Println(err)
 }
 
 //Stop player
@@ -97,12 +93,9 @@ type Server struct {
 	chStop  chan error
 	chConn  chan net.Conn
 	chSig   chan os.Signal
-	mutext  *sync.Mutex
 }
 
 func (s *Server) getFreeIndex() uint64 {
-	s.mutext.Lock()
-	defer s.mutext.Unlock()
 	var i uint64 = 1
 	for i = 1; i <= s.index; i++ {
 		if _, ok := s.players[i]; !ok {
@@ -128,32 +121,32 @@ func (s *Server) brocastPlayerList() {
 
 //Run start service
 func (s *Server) Run() {
-	for {
-		select {
-		case conn := <-s.chConn:
+	go func() {
+		for {
+			conn := <-s.chConn
 			index := s.getFreeIndex()
 			player := &Player{
 				index:  index,
 				conn:   conn,
 				s:      s,
-				chStop: make(chan error, 1),
+				chStop: make(chan error),
 			}
 			s.players[index] = player
 			go player.Play()
 			s.brocastPlayerList()
 			log.Printf("player(%d) %s connect.\n", index, conn.RemoteAddr().String())
-		case msg := <-s.chStop:
-			var array []uint64
-			for index := range s.players {
-				array = append(array, index)
-			}
-			for _, index := range array {
-				s.GetPlayer(index).Stop()
-			}
-			log.Printf("server stop: %s\n", msg.Error())
-			return
 		}
+	}()
+
+	msg := <-s.chStop
+	var array []uint64
+	for index := range s.players {
+		array = append(array, index)
 	}
+	for _, index := range array {
+		s.GetPlayer(index).Stop()
+	}
+	log.Printf("server stop: %s\n", msg.Error())
 }
 
 //ListenTCP only call func use go routine
@@ -201,13 +194,8 @@ func (s *Server) RegisterHandle(id protocol.C2SCmd, f func(*Player, []byte)) {
 //HandleSignal ...
 func (s *Server) HandleSignal() {
 	signal.Notify(s.chSig, os.Interrupt)
-	for {
-		select {
-		case sig := <-s.chSig:
-			s.chStop <- fmt.Errorf(sig.String())
-			return
-		}
-	}
+	sig := <-s.chSig
+	s.chStop <- fmt.Errorf(sig.String())
 }
 
 //NewServer instance
@@ -216,10 +204,9 @@ func NewServer() *Server {
 		index:   0,
 		players: make(map[uint64]*Player),
 		handles: make(map[int32]func(*Player, []byte)),
-		chStop:  make(chan error, 1),
-		chConn:  make(chan net.Conn, 1),
-		chSig:   make(chan os.Signal, 1),
-		mutext:  &sync.Mutex{},
+		chStop:  make(chan error),
+		chConn:  make(chan net.Conn),
+		chSig:   make(chan os.Signal),
 	}
 	s.RegisterHandle(protocol.C2SCmd_Abnormal, func(p *Player, msg []byte) {
 		p.Stop()

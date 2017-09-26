@@ -16,9 +16,11 @@ import (
 
 var handles map[int32]func([]byte)
 var chStop chan error
+var chSig chan os.Signal
 
 func init() {
-	chStop = make(chan error, 1)
+	chStop = make(chan error)
+	chSig = make(chan os.Signal)
 	handles = make(map[int32]func([]byte))
 	registerHandle(protocol.S2CCmd_Invalid, stopClient)
 	registerHandle(protocol.S2CCmd_Result, showMsg)
@@ -47,21 +49,19 @@ func showMsg(msg []byte) {
 	log.Println(result.Context)
 }
 
-func main() {
-	chSig := make(chan os.Signal, 1)
+func handleSignal() {
 	signal.Notify(chSig, os.Interrupt)
-	go func(sig <-chan os.Signal, stop chan<- error) {
-		for {
-			select {
-			case s := <-sig:
-				stop <- fmt.Errorf("stop clinet: %s", s.String())
-				return
-			}
-		}
-	}(chSig, chStop)
+	s := <-chSig
+	chStop <- fmt.Errorf("stop clinet: %s", s.String())
+}
 
-	chConn := make(chan net.Conn, 1)
-	go func(ch chan<- net.Conn) {
+func main() {
+	go handleSignal()
+
+	//Dail TCP
+	chConn1 := make(chan net.Conn)
+	chConn2 := make(chan net.Conn)
+	go func(ch1, ch2 chan<- net.Conn) {
 		for {
 			select {
 			case <-time.Tick(time.Second):
@@ -71,23 +71,23 @@ func main() {
 					log.Println(err)
 					continue
 				}
-				ch <- conn
+				log.Printf("%s established", conn.RemoteAddr().String())
+				ch1 <- conn
+				ch2 <- conn
 				return
 			}
 		}
-	}(chConn)
-
-	conn := <-chConn
-	log.Printf("%s established", conn.RemoteAddr().String())
+	}(chConn1, chConn2)
 
 	// Read data
-	go func(conn net.Conn, stop chan<- error) {
+	go func(ch <-chan net.Conn) {
+		conn := <-ch
 		var data []byte
 		buff := make([]byte, protocol.MaxSize)
 		for {
 			n, err := conn.Read(buff)
 			if err != nil {
-				stop <- err
+				chStop <- err
 				return
 			}
 			data = append(data, buff[:n]...)
@@ -104,10 +104,11 @@ func main() {
 				log.Printf("protocol(%d) not find\n", serial)
 			}
 		}
-	}(conn, chStop)
+	}(chConn1)
 
 	// Send data
-	go func(conn net.Conn, stop chan<- error) {
+	go func(ch <-chan net.Conn) {
+		conn := <-ch
 		for {
 			var input string
 			_, err := fmt.Scanln(&input)
@@ -132,24 +133,18 @@ func main() {
 				Context: v[1],
 			})
 		}
-	}(conn, chStop)
+	}(chConn2)
 
 	// Stress test
-	// go func(conn net.Conn) {
+	// go func(ch <-chan net.Conn) {
+	// 	conn := <-ch
 	// 	for {
 	// 		protocol.Send2Server(conn, protocol.C2SCmd_Chat, &protocol.C2SChat{
 	// 			Index:   1,
 	// 			Context: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 	// 		})
 	// 	}
-	// }(conn)
+	// }(chConn2)
 
-	for {
-		select {
-		case err := <-chStop:
-			conn.Close()
-			log.Println(err)
-			return
-		}
-	}
+	log.Println(<-chStop)
 }

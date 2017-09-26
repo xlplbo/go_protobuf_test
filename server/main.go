@@ -9,6 +9,7 @@ import (
 	"os/signal"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/golang/protobuf/proto"
 	"github.com/xlplbo/go_protobuf_test/protocol"
@@ -52,7 +53,6 @@ func (p *Player) Play() {
 	err := <-p.chStop
 	p.conn.Close()
 	p.s.DelPlayer(p.index)
-	close(p.chStop)
 	log.Println(err)
 }
 
@@ -63,8 +63,8 @@ func (p *Player) Stop() {
 
 //GetTargetPlayer ...
 func (p *Player) GetTargetPlayer(index uint64) *Player {
-	player := p.s.GetPlayer(index)
-	if player == nil {
+	player, ok := p.s.GetPlayer(index)
+	if !ok {
 		log.Printf("player(%d) non-exsit", index)
 		return nil
 	}
@@ -89,6 +89,7 @@ func (p *Player) GetIndex() uint64 {
 type Server struct {
 	index   uint64
 	players map[uint64]*Player
+	mutex   *sync.RWMutex
 	handles map[int32]func(*Player, []byte)
 	chStop  chan error
 	chConn  chan net.Conn
@@ -98,7 +99,7 @@ type Server struct {
 func (s *Server) getFreeIndex() uint64 {
 	var i uint64 = 1
 	for i = 1; i <= s.index; i++ {
-		if _, ok := s.players[i]; !ok {
+		if _, ok := s.GetPlayer(i); !ok {
 			return i
 		}
 	}
@@ -106,15 +107,39 @@ func (s *Server) getFreeIndex() uint64 {
 	return s.index
 }
 
+func (s *Server) getPlayerList() []*Player {
+	s.mutex.RLock()
+	defer s.mutex.RUnlock()
+	var list []*Player
+	for _, p := range s.players {
+		list = append(list, p)
+	}
+	return list
+}
+
+//GetPlayer ...
+func (s *Server) GetPlayer(index uint64) (*Player, bool) {
+	s.mutex.RLock()
+	defer s.mutex.RUnlock()
+	player, ok := s.players[index]
+	return player, ok
+}
+
+func (s *Server) setPlayer(index uint64, p *Player) {
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+	s.players[index] = p
+}
+
 func (s *Server) brocastPlayerList() {
 	var buf bytes.Buffer
 	buf.WriteString("playerlist:")
 	var array []string
-	for index := range s.players {
-		array = append(array, strconv.FormatUint(index, 10))
+	for _, p := range s.getPlayerList() {
+		array = append(array, strconv.FormatUint(p.GetIndex(), 10))
 	}
 	buf.WriteString(strings.Join(array, ","))
-	for _, p := range s.players {
+	for _, p := range s.getPlayerList() {
 		p.SendChat(buf.String() + fmt.Sprintf(" your id: %d", p.GetIndex()))
 	}
 }
@@ -131,7 +156,7 @@ func (s *Server) Run() {
 				s:      s,
 				chStop: make(chan error),
 			}
-			s.players[index] = player
+			s.setPlayer(index, player)
 			go player.Play()
 			s.brocastPlayerList()
 			log.Printf("player(%d) %s connect.\n", index, conn.RemoteAddr().String())
@@ -139,12 +164,8 @@ func (s *Server) Run() {
 	}()
 
 	msg := <-s.chStop
-	var array []uint64
-	for index := range s.players {
-		array = append(array, index)
-	}
-	for _, index := range array {
-		s.GetPlayer(index).Stop()
+	for _, p := range s.getPlayerList() {
+		p.Stop()
 	}
 	log.Printf("server stop: %s\n", msg.Error())
 }
@@ -167,16 +188,10 @@ func (s *Server) ListenTCP(laddr string) {
 	}
 }
 
-//GetPlayer instance
-func (s *Server) GetPlayer(key uint64) *Player {
-	if player, ok := s.players[key]; ok {
-		return player
-	}
-	return nil
-}
-
 //DelPlayer ...
 func (s *Server) DelPlayer(key uint64) {
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
 	delete(s.players, key)
 }
 
@@ -207,6 +222,7 @@ func NewServer() *Server {
 		chStop:  make(chan error),
 		chConn:  make(chan net.Conn),
 		chSig:   make(chan os.Signal),
+		mutex:   &sync.RWMutex{},
 	}
 	s.RegisterHandle(protocol.C2SCmd_Abnormal, func(p *Player, msg []byte) {
 		p.Stop()
